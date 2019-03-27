@@ -64,8 +64,15 @@ runcmd(struct cmd *cmd)
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
 
+  char * currCmd;
+  int fd;
+  int stringInd = 0, cmdInd = 0;
+  char c[1];
+  char s[512];
+
+
   if(cmd == 0)
-    exit();
+    exit(0);
 
   switch(cmd->type){
   default:
@@ -74,17 +81,47 @@ runcmd(struct cmd *cmd)
   case EXEC:
     ecmd = (struct execcmd*)cmd;
     if(ecmd->argv[0] == 0)
-      exit();
+      exit(0);
     exec(ecmd->argv[0], ecmd->argv);
-    printf(2, "exec %s failed\n", ecmd->argv[0]);
+    currCmd = ecmd->argv[0];
+    fd = open("/PATH.txt", O_RDONLY);
+
+    if(currCmd[0] != '/'){
+      while (read(fd,c,1) != 0){
+        if (c[0]!=':'){
+          s[stringInd] = c[0];
+          stringInd++;
+        }
+        else {
+          while(currCmd[cmdInd] != 0){
+            s[stringInd] = currCmd[cmdInd];
+            stringInd++;
+            cmdInd++;
+          }
+          s[stringInd] = 0;
+
+          stringInd = 0;
+          cmdInd = 0;
+          exec(s, ecmd->argv);
+        }
+      }
+      printf(2, "exec %s failed\n", ecmd->argv[0]);
+    }
+    else{
+      printf(2, "exec %s failed\n", ecmd->argv[0]);
+    }
+        
+    close(fd);
+
     break;
+
 
   case REDIR:
     rcmd = (struct redircmd*)cmd;
     close(rcmd->fd);
     if(open(rcmd->file, rcmd->mode) < 0){
       printf(2, "open %s failed\n", rcmd->file);
-      exit();
+      exit(0);
     }
     runcmd(rcmd->cmd);
     break;
@@ -93,7 +130,7 @@ runcmd(struct cmd *cmd)
     lcmd = (struct listcmd*)cmd;
     if(fork1() == 0)
       runcmd(lcmd->left);
-    wait();
+    wait(0);
     runcmd(lcmd->right);
     break;
 
@@ -117,8 +154,8 @@ runcmd(struct cmd *cmd)
     }
     close(p[0]);
     close(p[1]);
-    wait();
-    wait();
+    wait(0);
+    wait(0);
     break;
 
   case BACK:
@@ -127,7 +164,7 @@ runcmd(struct cmd *cmd)
       runcmd(bcmd->cmd);
     break;
   }
-  exit();
+  exit(0);
 }
 
 int
@@ -166,16 +203,16 @@ main(void)
     }
     if(fork1() == 0)
       runcmd(parsecmd(buf));
-    wait();
+    wait(0);
   }
-  exit();
+  exit(0);
 }
 
 void
 panic(char *s)
 {
   printf(2, "%s\n", s);
-  exit();
+  exit(0);
 }
 
 int

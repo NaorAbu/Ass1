@@ -8,15 +8,23 @@
 #include "proc.h"
 #include "spinlock.h"
 
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
+
+
 extern PriorityQueue pq;
 extern RoundRobinQueue rrq;
 extern RunningProcessesHolder rpholder;
 
+
 long long getAccumulator(struct proc *p) {
-	//Implement this function, remove the panic line.
-	panic("getAccumulator: not implemented\n");
+	return p->accumulator;
 }
 
+enum policy {
+    Round_Robin_Queue =1,
+    Priority_Queue=2,
+    Extended_Priority_Queue=3,
+};
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
@@ -24,11 +32,30 @@ struct {
 
 static struct proc *initproc;
 
+int policy = 2;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
 
 static void wakeup1(void *chan);
+
+
+void
+add(struct proc *p)
+{
+	switch(policy){
+		case Round_Robin_Queue:
+			rrq.enqueue(p);
+			break;
+		case Priority_Queue:
+			pq.put(p);
+			break;
+		case Extended_Priority_Queue:
+			//addEPQ()
+			break;
+	}
+}
+
 
 void
 pinit(void)
@@ -98,6 +125,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = 5;
 
   release(&ptable.lock);
 
@@ -124,6 +152,20 @@ found:
 
   return p;
 }
+void setNewAcc(struct proc* p){
+  if (!(rpholder.getMinAccumulator(&p->accumulator))){
+      if (pq.isEmpty()){
+          p->accumulator = 0;
+      }else{
+          p->accumulator = (pq.extractMin())->accumulator;
+      }
+  }else{
+      if (!(pq.isEmpty())){
+          p->accumulator = MIN(p->accumulator, (pq.extractMin())->accumulator);
+      }
+  }
+}
+
 
 //PAGEBREAK: 32
 // Set up first user process.
@@ -134,7 +176,8 @@ userinit(void)
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
   p = allocproc();
-  
+  setNewAcc(p);
+
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -159,6 +202,8 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  p->accumulator += p->priority;
+  add(p);
 
   release(&ptable.lock);
 }
@@ -198,7 +243,7 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
-
+  setNewAcc(np);
   // Copy process state from proc.
   if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
     kfree(np->kstack);
@@ -225,6 +270,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  np->accumulator += np->priority;
+  add(np);
 
   release(&ptable.lock);
 
@@ -233,13 +280,14 @@ fork(void)
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
-// until its parent calls wait() to find out it exited.
+// until its parent calls wait(0) to find out it exited.
 void
-exit(void)
+exit(int status)
 {
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
+  curproc->status = status;
 
   if(curproc == initproc)
     panic("init exiting");
@@ -259,7 +307,7 @@ exit(void)
 
   acquire(&ptable.lock);
 
-  // Parent might be sleeping in wait().
+  // Parent might be sleeping in wait(0).
   wakeup1(curproc->parent);
 
   // Pass abandoned children to init.
@@ -280,7 +328,7 @@ exit(void)
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
-wait(void)
+wait(int* status)
 {
   struct proc *p;
   int havekids, pid;
@@ -296,6 +344,9 @@ wait(void)
       havekids = 1;
       if(p->state == ZOMBIE){
         // Found one.
+        if(status != 0){
+          *status = p->status;
+        }
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
@@ -320,7 +371,21 @@ wait(void)
     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
   }
 }
+struct proc* chooseProc(){
+	struct proc* p = null;	
+    switch (policy){
+    	case Round_Robin_Queue:
+    	    p = rrq.dequeue();
+    		break;
+    	case Priority_Queue:
+    	    p = pq.extractMin();
+    		break;
+    	case Extended_Priority_Queue:
+    		break;
+		}
+return p;
 
+}
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -342,9 +407,11 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    p =chooseProc();
+    if(!p){
+    	release(&ptable.lock);
+    	continue;
+    }
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -359,7 +426,6 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-    }
     release(&ptable.lock);
 
   }
@@ -397,6 +463,7 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   myproc()->state = RUNNABLE;
+  add(myproc());
   sched();
   release(&ptable.lock);
 }
@@ -470,8 +537,12 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
-      p->state = RUNNABLE;
+    if(p->state == SLEEPING && p->chan == chan){
+        setNewAcc(p);
+        p->state = RUNNABLE;
+      add(p);
+    }
+
 }
 
 // Wake up all processes sleeping on chan.
@@ -496,8 +567,12 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING){
+          setNewAcc(p);
         p->state = RUNNABLE;
+        add(p);
+    }
+
       release(&ptable.lock);
       return 0;
     }
@@ -542,3 +617,25 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+int
+detach(int pid)
+{
+  struct proc *p;
+  struct proc *curproc = myproc();
+  
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+	  if(p->pid == pid && p->parent == curproc){
+	    p->parent = initproc;
+
+        if(p->state == ZOMBIE)
+          wakeup1(initproc);
+
+        return 0;
+	    }
+
+	}
+	return -1;
+}
+
+
